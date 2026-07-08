@@ -423,6 +423,24 @@
     await window.storage.set('roster', JSON.stringify(list), true);
   }
 
+  // Pulls each guest's live checked-in status (as written by the scan page)
+  // and re-saves it into the roster doc, since scanning only updates the
+  // individual guest:<token> record, not the cached roster list.
+  async function syncCheckedInStatuses(){
+    const list = await loadRoster();
+    const results = await Promise.all(list.map(async (g) => {
+      try {
+        const r = await window.storage.get('guest:' + g.token, true);
+        const rec = r && r.value ? JSON.parse(r.value) : g;
+        return { name: g.name, email: g.email, token: g.token, checkedIn: !!rec.checkedIn, checkedInAt: rec.checkedInAt };
+      } catch(e) {
+        return g;
+      }
+    }));
+    await saveRoster(results);
+    return results;
+  }
+
   function parseInput(text){
     // Accept "Name" per line, or "Name, email".
     return text.split('\n')
@@ -581,22 +599,7 @@
     };
 
     document.getElementById('refreshBtn').onclick = async () => {
-      // Re-check every guest's live status (in case staff have been scanning)
-      const list = await loadRoster();
-      const refreshed = [];
-      await Promise.all(list.map(async (g) => {
-        try {
-          const r = await window.storage.get('guest:' + g.token, true);
-          const rec = r && r.value ? JSON.parse(r.value) : g;
-          refreshed.push({ name: g.name, email: g.email, token: g.token, checkedIn: !!rec.checkedIn, checkedInAt: rec.checkedInAt });
-        } catch(e) {
-          refreshed.push(g);
-        }
-      }));
-      // preserve original order
-      const byToken = Object.fromEntries(refreshed.map(g => [g.token, g]));
-      const ordered = list.map(g => byToken[g.token] || g);
-      await saveRoster(ordered);
+      await syncCheckedInStatuses();
       renderAdmin();
     };
 
@@ -789,5 +792,37 @@
   }
 
   renderAdmin();
+
+  // Keep check-in status current without a manual click: scans from other
+  // devices only update the individual guest record, not this page's view,
+  // so re-sync whenever this tab regains focus, plus a light periodic poll
+  // while it stays open. In-progress typing in the paste/search boxes is
+  // preserved across the refresh so staff don't lose their place.
+  let autoRefreshInFlight = false;
+  async function autoRefresh(){
+    if (autoRefreshInFlight) return;
+    autoRefreshInFlight = true;
+    try {
+      const pasteEl = document.getElementById('pasteArea');
+      const searchEl = document.getElementById('rosterSearch');
+      const pasteVal = pasteEl ? pasteEl.value : '';
+      const searchVal = searchEl ? searchEl.value : '';
+      await syncCheckedInStatuses();
+      await renderAdmin();
+      const newPasteEl = document.getElementById('pasteArea');
+      const newSearchEl = document.getElementById('rosterSearch');
+      if (newPasteEl && pasteVal) newPasteEl.value = pasteVal;
+      if (newSearchEl && searchVal) {
+        newSearchEl.value = searchVal;
+        newSearchEl.dispatchEvent(new Event('input'));
+      }
+    } finally {
+      autoRefreshInFlight = false;
+    }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') autoRefresh();
+  });
+  setInterval(autoRefresh, 20000);
 })();
 </script>
